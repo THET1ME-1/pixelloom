@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pixelloom"
-version = "0.1.0"
+version = "0.2.0"
 description = "Рисование пиксель-арта кодом с живым просмотром в браузере"
 readme = "README.md"
 requires-python = ">=3.10"

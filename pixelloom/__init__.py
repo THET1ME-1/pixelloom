@@ -15,7 +15,7 @@
 
 from .canvas import TRANSPARENT, Canvas
 from .palette import Palette, hex_to_rgb, rgb_to_hex
-from . import draw, noise, paint, palettes, render
+from . import draw, isoparts, noise, paint, palettes, render
 from .render import (
     save_contact_sheet,
     save_gif,
@@ -27,7 +27,7 @@ from .render import (
     to_image,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Canvas",
@@ -35,6 +35,7 @@ __all__ = [
     "TRANSPARENT",
     "draw",
     "hex_to_rgb",
+    "isoparts",
     "noise",
     "paint",
     "palettes",
