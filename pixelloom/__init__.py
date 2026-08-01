@@ -15,7 +15,7 @@
 
 from .canvas import TRANSPARENT, Canvas
 from .palette import Palette, hex_to_rgb, rgb_to_hex
-from . import draw, isoparts, noise, paint, palettes, render
+from . import critique, draw, isoparts, noise, paint, palettes, passes, render, shading, volume
 from .render import (
     save_contact_sheet,
     save_gif,
@@ -33,13 +33,17 @@ __all__ = [
     "Canvas",
     "Palette",
     "TRANSPARENT",
+    "critique",
     "draw",
     "hex_to_rgb",
     "isoparts",
     "noise",
     "paint",
+    "passes",
     "palettes",
     "render",
+    "shading",
+    "volume",
     "rgb_to_hex",
     "save_contact_sheet",
     "save_gif",
