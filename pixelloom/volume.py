@@ -170,12 +170,21 @@ def render(
     ambient: float = 0.18,
     reflex: float = 0.55,
     dither: float = 0.12,
+    ranges: dict[str, tuple[float, float]] | None = None,
+    default_range: tuple[float, float] = (0.0, 1.0),
 ) -> dict[str, np.ndarray]:
     """Разложить части по холсту. Возвращает поля освещённости по материалам.
 
     Части кладутся по глубине: что выше, то и перекрывает. Тон берётся
     индексом в шкале материала — конкретных цветов эта функция не знает.
+
+    [ranges] — какую часть шкалы материалу вообще разрешено занимать. Кожа,
+    отработавшая все шесть ступеней, уходит в грязь: половина лица чернеет.
+    В хороших работах кожа живёт в двух-трёх соседних тонах, а крайние
+    остаются на окклюзию и блик. Диапазон и есть сила света: чем он у́же,
+    тем мягче.
     """
+    ranges = ranges or {}
     fields: dict[str, np.ndarray] = {}
     tile = np.tile(
         np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]],
@@ -188,7 +197,8 @@ def render(
         if not ramp or not body.mask.any():
             continue
         field = light_field(body, light, ambient=ambient, reflex=reflex)
-        value = field * (len(ramp) - 1)
+        lo, hi = ranges.get(body.material, default_range)
+        value = (lo + (hi - lo) * field) * (len(ramp) - 1)
         if dither > 0:
             frac = value - np.floor(value)
             band = (frac < dither) | (frac > 1 - dither)
@@ -234,9 +244,11 @@ class Scene:
         self.bodies.append(body)
         return body
 
-    def draw(self, ramps: dict[str, list[int]], dither: float = 0.12) -> dict:
+    def draw(self, ramps: dict[str, list[int]], dither: float = 0.12,
+             ranges: dict[str, tuple[float, float]] | None = None) -> dict:
         return render(self.canvas, self.bodies, ramps, light=self.light,
-                      ambient=self.ambient, reflex=self.reflex, dither=dither)
+                      ambient=self.ambient, reflex=self.reflex, dither=dither,
+                      ranges=ranges)
 
 
 # ── сложные формы ────────────────────────────────────────────────────────
