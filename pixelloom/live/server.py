@@ -14,12 +14,22 @@ from pathlib import Path
 UI_FILE = Path(__file__).with_name("ui.html")
 
 
-def serve(view) -> ThreadingHTTPServer:
-    """Поднять сервер в отдельном потоке и вернуть его."""
-    server = ThreadingHTTPServer(("127.0.0.1", view.port), _handler(view))
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+def serve(view, tries: int = 20) -> ThreadingHTTPServer:
+    """Поднять сервер в отдельном потоке и вернуть его.
+
+    Занятый порт не повод падать: рядом почти всегда есть свободный, а
+    занимает его обычно прошлый запуск того же скрипта.
+    """
+    for offset in range(tries):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", view.port + offset), _handler(view))
+        except OSError:
+            continue
+        view.port += offset
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+    raise OSError(f"свободный порт не нашёлся: {view.port}…{view.port + tries - 1}")
 
 
 def _handler(view):

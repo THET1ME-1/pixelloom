@@ -300,7 +300,7 @@ function renderQueue(q){
   const box = $('queue');
   if(!q.length){ box.innerHTML = '<div class="empty">пусто</div>'; $('qcount').textContent = 'ждём работу'; return; }
   const done = q.filter(x => x.state === 'done').length;
-  $('qcount').textContent = `${done} из ${q.length}`;
+  $('qcount').textContent = `готово ${done} из ${q.length}`;
   box.innerHTML = q.map(x => {
     const mark = x.state === 'done' ? '✓' : x.state === 'now' ? '▸' : '·';
     const meta = x.state === 'now' ? 'сейчас' : '';

@@ -177,6 +177,26 @@ class LiveView:
             self._close_step()
             self._step_name = prev
 
+    def stage(self, name: str) -> None:
+        """То же без отступа: всё, что рисуется дальше, попадёт в этот шаг.
+
+        Удобно в длинных линейных скриптах, где `with` на каждый этап только
+        мешает читать. Следующий вызов закрывает предыдущий шаг.
+        """
+        self._close_step()
+        self._step_name = name
+
+    def snapshot(self, canvas: Canvas | None = None, note: str = "") -> None:
+        """Положить кадр в ленту, даже если пиксели не менялись."""
+        if note:
+            self.stage(note)
+        target = canvas or self._canvas
+        if target is None:
+            return
+        if self._current is None:
+            self._open_step(self._step_name or note or "снимок")
+        self._close_step()
+
     def task(self, name: str, total: int = 0) -> None:
         """Отметить, какая работа пошла: имя видно в очереди слева."""
         with self._lock:
