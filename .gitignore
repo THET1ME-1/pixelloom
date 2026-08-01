@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+out/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+CLAUDE.md
+CLAUDE.local.md

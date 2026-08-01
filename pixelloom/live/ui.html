@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pixelloom — живой просмотр</title>
+<!--
+  Верстак: слева очередь работ и лента шагов, в центре холст с лупой,
+  справа инспектор, палитра и плеер готовых кадров.
+
+  Система: фон 0B0A0F, панель 131218, линии 232029,
+  текст EDE9F2 / 8C8799, акцент C7762C, шрифт моноширинный, ритм 8px.
+  Пиксели приходят дельтами по SSE и ложатся в canvas через putImageData.
+-->
+<style>
+  :root{
+    --bg:#0B0A0F; --panel:#131218; --panel-2:#191720; --line:#232029;
+    --ink:#EDE9F2; --ink-dim:#8C8799; --ink-faint:#5A566A;
+    --accent:#C7762C; --accent-hot:#DE924F;
+    --mono:ui-monospace,"JetBrains Mono","SFMono-Regular","Cascadia Code","Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0; background:var(--bg); color:var(--ink); font:13px/1.5 var(--mono); overflow:hidden}
+  .shell{display:grid; grid-template-columns:194px 1fr 234px; height:100vh}
+  .col{display:flex; flex-direction:column; min-width:0; min-height:0}
+  .col+.col{border-left:1px solid var(--line)}
+  .col.side{background:var(--panel)}
+  .blk{padding:12px 14px; border-bottom:1px solid var(--line)}
+  h2{
+    margin:0 0 9px; font:400 10px/1 var(--mono); letter-spacing:.16em;
+    text-transform:uppercase; color:var(--ink-faint);
+  }
+  .num{font-variant-numeric:tabular-nums}
+  button{
+    font:inherit; font-size:11px; color:var(--ink-dim); background:var(--panel-2);
+    border:1px solid var(--line); padding:4px 10px; cursor:pointer;
+  }
+  button:hover{color:var(--ink); border-color:#332F3D}
+  button[aria-pressed="true"]{color:var(--bg); background:var(--accent); border-color:var(--accent)}
+  button:focus-visible{outline:1px solid var(--accent-hot); outline-offset:1px}
+
+  /* --- очередь и шаги --- */
+  .scroll{overflow-y:auto; min-height:0}
+  .qrow,.srow{
+    display:grid; grid-template-columns:11px 1fr auto; gap:8px; align-items:center;
+    padding:5px 8px; font-size:13px; color:var(--ink-faint);
+  }
+  .qrow{cursor:default}
+  .srow{cursor:pointer}
+  .srow:hover{background:var(--panel-2)}
+  .qrow.done,.srow.done{color:var(--ink-dim)}
+  .qrow.now,.srow.now{color:var(--ink); background:var(--panel-2); box-shadow:inset 2px 0 0 var(--accent)}
+  .srow[aria-current="true"]{color:var(--ink); border:1px solid var(--accent)}
+  .qrow u,.srow u{text-decoration:none; font-size:10px; color:var(--ink-faint)}
+  .qrow.now u,.srow.now u{color:var(--accent-hot)}
+  .qrow em,.srow em{font-style:normal; font-size:10px; color:var(--ink-faint)}
+  .empty{padding:9px 8px; color:var(--ink-faint); font-size:11px}
+
+  /* --- центр --- */
+  .bar{
+    display:flex; align-items:center; gap:9px; padding:9px 14px;
+    border-bottom:1px solid var(--line); font-size:11px; color:var(--ink-faint);
+  }
+  .bar #title{font-size:16px; color:var(--ink); letter-spacing:.01em}
+  .bar .step{color:var(--accent-hot); font-size:13px}
+  .bar .grow{margin-left:auto; display:flex; gap:5px}
+  .view{
+    flex:1; min-height:0; display:grid; place-items:center; padding:22px; position:relative;
+    background:repeating-conic-gradient(#141319 0% 25%, #101017 0% 50%) 0 0/24px 24px;
+  }
+  #canvas{image-rendering:pixelated; display:block; outline:1px solid var(--line)}
+  #grid{position:absolute; pointer-events:none; image-rendering:pixelated}
+  .loupe{
+    position:absolute; right:18px; bottom:18px; width:116px; height:116px;
+    border:1px solid var(--line); background:#0D0C12;
+  }
+  .loupe canvas{width:114px; height:114px; image-rendering:pixelated}
+  .loupe span{
+    position:absolute; left:0; bottom:0; font-size:9px; color:var(--ink-faint);
+    background:rgba(11,10,15,.82); padding:1px 5px;
+  }
+  .foot{
+    display:flex; align-items:center; gap:9px; padding:9px 14px;
+    border-top:1px solid var(--line); color:var(--ink-faint); font-size:11px;
+  }
+  .foot .grow{margin-left:auto; display:flex; gap:5px}
+  .conn{display:flex; align-items:center; gap:7px}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--accent)}
+  .dot.off{background:#3A3646}
+
+  /* --- инспектор --- */
+  .kv{display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:11px; margin:0}
+  .kv dt{color:var(--ink-faint)}
+  .kv dd{margin:0; text-align:right; color:var(--ink)}
+  .swatch{display:inline-block; width:8px; height:8px; margin-right:5px; outline:1px solid rgba(255,255,255,.14)}
+  .pal{display:grid; grid-template-columns:repeat(8,1fr); gap:3px}
+  .pal i{aspect-ratio:1; outline:1px solid rgba(255,255,255,.06); transition:transform .08s}
+  .pal i.on{outline:1px solid var(--accent-hot); transform:scale(1.22)}
+  .bars{display:flex; align-items:flex-end; gap:2px; height:24px; margin-top:8px}
+  .bars i{flex:1; background:#2A2633; min-height:2px}
+  .bars i:last-child{background:var(--accent)}
+  .player{display:flex; gap:11px; align-items:center}
+  .player canvas{width:72px; height:72px; image-rendering:pixelated; background:#0D0C12; outline:1px solid var(--line)}
+  .player .meta{font-size:10px; color:var(--ink-faint); line-height:1.8}
+  .player .meta b{color:var(--ink-dim); font-weight:400}
+  .anames{display:flex; flex-wrap:wrap; gap:4px; margin-top:9px}
+  .anames button{padding:3px 8px}
+  .actions{display:grid; gap:6px; padding:12px 14px; margin-top:auto; border-top:1px solid var(--line)}
+  a.btn{
+    display:block; text-align:center; text-decoration:none; font-size:11px;
+    color:var(--ink-dim); background:var(--panel-2); border:1px solid var(--line); padding:6px 10px;
+  }
+  a.btn:hover{color:var(--ink); border-color:#332F3D}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── очередь и шаги ── -->
+  <div class="col side">
+    <div class="blk">
+      <h2>очередь</h2>
+      <div class="num" id="qcount" style="font-size:11px;color:var(--ink-faint)">ждём работу</div>
+    </div>
+    <div class="scroll" id="queue" style="max-height:42%"><div class="empty">пусто</div></div>
+    <div class="blk" style="border-top:1px solid var(--line)"><h2>шаги</h2></div>
+    <div class="scroll" id="steps" style="flex:1"><div class="empty">пока пусто</div></div>
+  </div>
+
+  <!-- ── холст ── -->
+  <div class="col">
+    <div class="bar">
+      <span id="title">pixelloom</span>
+      <span>·</span>
+      <span class="step" id="step">ожидание кадра</span>
+      <span class="num" id="time">0.00 с</span>
+      <div class="grow">
+        <button id="hold">пауза</button>
+        <button data-pace="0">полный ход</button>
+        <button data-pace="1" aria-pressed="true">×1</button>
+        <button data-pace="4">×¼</button>
+        <button id="gridbtn" aria-pressed="false">сетка</button>
+      </div>
+    </div>
+    <div class="view">
+      <canvas id="canvas" width="1" height="1"></canvas>
+      <canvas id="grid"></canvas>
+      <div class="loupe"><canvas id="loupe" width="114" height="114"></canvas><span id="xy">—</span></div>
+    </div>
+    <div class="foot">
+      <span class="conn"><i class="dot off" id="dot"></i><span id="conn">подключение…</span></span>
+      <span>·</span>
+      <span class="num" id="dims">—</span>
+      <div class="grow">
+        <button data-zoom="fit" aria-pressed="true">вписать <b id="fitk" style="font-weight:400;opacity:.7"></b></button>
+        <button data-zoom="4">×4</button>
+        <button data-zoom="8">×8</button>
+        <button data-zoom="16">×16</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── инспектор ── -->
+  <div class="col side">
+    <div class="blk">
+      <h2>операция</h2>
+      <dl class="kv">
+        <dt>шаг</dt><dd id="k-step">—</dd>
+        <dt>цвет</dt><dd id="k-color">—</dd>
+        <dt>область</dt><dd class="num" id="k-box">—</dd>
+        <dt>пикселей</dt><dd class="num" id="k-drawn">0</dd>
+        <dt>скорость</dt><dd class="num" id="k-rate">0 /с</dd>
+      </dl>
+      <div class="bars" id="bars"></div>
+    </div>
+    <div class="blk"><h2>палитра</h2><div class="pal" id="pal"></div></div>
+    <div class="blk">
+      <h2>кадры</h2>
+      <div class="player">
+        <canvas id="anim" width="1" height="1"></canvas>
+        <div class="meta" id="anim-meta">анимаций нет</div>
+      </div>
+      <div class="anames" id="anames"></div>
+    </div>
+    <div class="actions">
+      <a class="btn" href="/frame.png?download=frame.png" download>скачать кадр</a>
+      <a class="btn" href="/timelapse.gif?scale=4&fps=6" download>скачать таймлапс</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('canvas');
+const ctx = cv.getContext('2d');
+const loupe = document.getElementById('loupe').getContext('2d');
+const gridCv = document.getElementById('grid');
+
+let W = 0, H = 0, img = null, palette = [], zoom = 'fit', showGrid = false;
+let lastBox = null, rates = new Array(22).fill(0), pinned = null, holding = false;
+let anims = [], animIdx = 0, animFrames = [], animTimer = null;
+
+const $ = id => document.getElementById(id);
+const b64 = s => { const raw = atob(s), out = new Uint8Array(raw.length);
+  for(let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out; };
+
+/* ── холст ─────────────────────────────────────────────── */
+function resize(w, h){
+  W = w; H = h;
+  cv.width = w; cv.height = h;
+  img = ctx.createImageData(w, h);
+  $('dims').textContent = `${w}×${h} пикс`;
+  applyZoom();
+}
+
+function paintRect(box, bytes){
+  const [x0, y0, bw, bh] = box;
+  for(let y = 0; y < bh; y++){
+    for(let x = 0; x < bw; x++){
+      put(x0 + x, y0 + y, bytes[y*bw + x]);
+    }
+  }
+}
+
+function paintSparse(bytes){
+  const dv = new DataView(bytes.buffer);
+  for(let o = 0; o + 5 <= bytes.length; o += 5){
+    const at = dv.getUint32(o, true), v = bytes[o + 4];
+    put(at % W, (at / W) | 0, v);
+  }
+}
+
+function put(x, y, v){
+  if(x < 0 || y < 0 || x >= W || y >= H) return;
+  const o = (y*W + x)*4, d = img.data;
+  if(v === 255){ d[o+3] = 0; return; }             // 255 — прозрачный слот
+  const c = palette[v];
+  if(!c) return;
+  d[o] = c.r; d[o+1] = c.g; d[o+2] = c.b; d[o+3] = 255;
+}
+
+function flush(){ if(img) ctx.putImageData(img, 0, 0); }
+
+function applyZoom(){
+  if(!W) return;
+  const box = document.querySelector('.view').getBoundingClientRect();
+  let k;
+  if(zoom === 'fit'){
+    // только целые кратные: дробный масштаб размывает пиксельную сетку
+    k = Math.max(1, Math.floor(Math.min((box.width - 56)/W, (box.height - 56)/H)));
+    $('fitk').textContent = '×' + k;
+  } else { k = Number(zoom); $('fitk').textContent = ''; }
+  cv.style.width = (W*k) + 'px'; cv.style.height = (H*k) + 'px';
+  drawGrid(k);
+}
+
+function drawGrid(k){
+  if(!showGrid || k < 4){ gridCv.style.display = 'none'; return; }
+  gridCv.style.display = 'block';
+  gridCv.width = W*k; gridCv.height = H*k;
+  gridCv.style.width = (W*k) + 'px'; gridCv.style.height = (H*k) + 'px';
+  const g = gridCv.getContext('2d');
+  g.clearRect(0, 0, gridCv.width, gridCv.height);
+  for(let x = 0; x <= W; x += 8){
+    g.fillStyle = x % 32 === 0 ? 'rgba(255,255,255,.30)' : 'rgba(255,255,255,.13)';
+    g.fillRect(x*k, 0, 1, H*k);
+  }
+  for(let y = 0; y <= H; y += 8){
+    g.fillStyle = y % 32 === 0 ? 'rgba(255,255,255,.30)' : 'rgba(255,255,255,.13)';
+    g.fillRect(0, y*k, W*k, 1);
+  }
+}
+addEventListener('resize', applyZoom);
+
+/* ── лупа ──────────────────────────────────────────────── */
+function drawLoupe(){
+  if(!lastBox || !W) return;
+  const [x0, y0, bw, bh] = lastBox;
+  const cx = x0 + bw/2, cy = y0 + bh/2;
+  const span = Math.max(10, Math.min(Math.max(bw, bh) + 6, Math.max(W, H)));
+  loupe.imageSmoothingEnabled = false;
+  loupe.fillStyle = '#0D0C12';
+  loupe.fillRect(0, 0, 114, 114);
+  loupe.drawImage(cv, cx - span/2, cy - span/2, span, span, 0, 0, 114, 114);
+  $('xy').textContent = `x ${x0} · y ${y0} · ${bw}×${bh}`;
+}
+
+/* ── правая колонка ────────────────────────────────────── */
+function renderPalette(list){
+  palette = [];
+  list.forEach(c => {
+    const [r, g, b] = [1,3,5].map(i => parseInt(c.hex.substr(i,2), 16));
+    palette[c.i] = {r, g, b, hex: c.hex, label: c.label};
+  });
+  $('pal').innerHTML = list.map(c =>
+    `<i data-i="${c.i}" style="background:${c.hex}" title="${c.i} · ${c.label} · ${c.hex}"></i>`).join('');
+}
+
+function renderQueue(q){
+  const box = $('queue');
+  if(!q.length){ box.innerHTML = '<div class="empty">пусто</div>'; $('qcount').textContent = 'ждём работу'; return; }
+  const done = q.filter(x => x.state === 'done').length;
+  $('qcount').textContent = `${done} из ${q.length}`;
+  box.innerHTML = q.map(x => {
+    const mark = x.state === 'done' ? '✓' : x.state === 'now' ? '▸' : '·';
+    const meta = x.state === 'now' ? 'сейчас' : '';
+    return `<div class="qrow ${x.state}"><u>${mark}</u><span>${x.name}</span><em>${meta}</em></div>`;
+  }).join('');
+}
+
+function renderSteps(steps){
+  const box = $('steps');
+  if(!steps.length){ box.innerHTML = '<div class="empty">пока пусто</div>'; return; }
+  box.innerHTML = steps.slice().reverse().map((s, n) => {
+    const now = n === 0;
+    return `<div class="srow ${now ? 'now' : 'done'}" data-i="${s.i}" ${s.shot ? '' : 'data-live="1"'}
+              aria-current="${pinned === s.i}">
+      <u>${now ? '▸' : '✓'}</u><span>${s.name}</span><em class="num">${s.px}</em></div>`;
+  }).join('');
+  box.querySelectorAll('.srow').forEach(el => {
+    el.onclick = () => {
+      const i = Number(el.dataset.i);
+      if(el.dataset.live){ pinned = null; flush(); }
+      else { pinned = i; showShot(i); }
+      box.querySelectorAll('.srow').forEach(x => x.setAttribute('aria-current', x === el && pinned !== null));
+    };
+  });
+}
+
+function showShot(i){
+  const im = new Image();
+  im.onload = () => { ctx.clearRect(0, 0, W, H); ctx.drawImage(im, 0, 0); };
+  im.src = '/step.png?i=' + i;
+}
+
+function renderAnims(list){
+  anims = list;
+  const box = $('anames');
+  if(!list.length){ box.innerHTML = ''; $('anim-meta').textContent = 'анимаций нет'; return; }
+  box.innerHTML = list.map((a, i) =>
+    `<button data-a="${i}" aria-pressed="${i === animIdx}">${a.name}</button>`).join('');
+  box.querySelectorAll('[data-a]').forEach(b => {
+    b.onclick = () => { playAnim(Number(b.dataset.a)); };
+  });
+  playAnim(Math.min(animIdx, list.length - 1));
+}
+
+function playAnim(i){
+  animIdx = i;
+  const a = anims[i];
+  if(!a) return;
+  $('anames').querySelectorAll('[data-a]').forEach(b =>
+    b.setAttribute('aria-pressed', Number(b.dataset.a) === i));
+  $('anim-meta').innerHTML = `<b>${a.name}</b><br>${a.frames.length} кадров<br>${a.fps} к/с`;
+  clearInterval(animTimer);
+  animFrames = [];
+  let ready = 0;
+  a.frames.forEach((src, n) => {
+    const im = new Image();
+    im.onload = () => {
+      animFrames[n] = im; ready++;
+      if(ready === 1){
+        const c = $('anim'); c.width = im.width; c.height = im.height;
+      }
+    };
+    im.src = 'data:image/png;base64,' + src;
+  });
+  let f = 0;
+  const c = $('anim').getContext('2d');
+  animTimer = setInterval(() => {
+    const im = animFrames[f % animFrames.length];
+    if(!im) return;
+    c.clearRect(0, 0, $('anim').width, $('anim').height);
+    c.imageSmoothingEnabled = false;
+    c.drawImage(im, 0, 0);
+    f++;
+  }, 1000 / a.fps);
+}
+
+function renderRates(){
+  $('bars').innerHTML = rates.map(v => {
+    const max = Math.max(40, ...rates);
+    return `<i style="height:${Math.max(2, Math.round(24*v/max))}px"></i>`;
+  }).join('');
+}
+
+/* ── поток ─────────────────────────────────────────────── */
+function connect(){
+  const es = new EventSource('/stream');
+  es.onopen = () => { $('dot').classList.remove('off'); $('conn').textContent = 'пиксели идут'; };
+  es.onerror = () => { $('dot').classList.add('off'); $('conn').textContent = 'обрыв, переподключение'; };
+  es.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if(m.kind === 'meta'){
+      $('title').textContent = m.title;
+      if(m.width && (m.width !== W || m.height !== H)) resize(m.width, m.height);
+      renderPalette(m.palette);
+      renderQueue(m.queue);
+      renderSteps(m.steps);
+      renderAnims(m.anims);
+      return;
+    }
+    if(m.kind === 'steps'){ renderSteps(m.steps); return; }
+    if(m.kind !== 'delta') return;
+
+    const bytes = b64(m.data);
+    if(m.shape === 'rect') paintRect(m.box, bytes); else paintSparse(bytes);
+    lastBox = m.box;
+    if(pinned === null) flush();
+    drawLoupe();
+
+    $('step').textContent = m.step || '—';
+    $('time').textContent = m.t.toFixed(2) + ' с';
+    $('k-step').textContent = m.step || '—';
+    $('k-drawn').textContent = m.drawn;
+    $('k-rate').textContent = m.rate + ' /с';
+    $('k-box').textContent = `${m.box[0]},${m.box[1]} · ${m.box[2]}×${m.box[3]}`;
+    const c = palette[m.color];
+    $('k-color').innerHTML = c
+      ? `<i class="swatch" style="background:${c.hex}"></i>${c.label}`
+      : '—';
+    document.querySelectorAll('#pal i').forEach(i =>
+      i.classList.toggle('on', Number(i.dataset.i) === m.color));
+    rates.push(m.rate); rates.shift(); renderRates();
+  };
+}
+
+/* ── управление ────────────────────────────────────────── */
+$('hold').onclick = () => {
+  holding = !holding;
+  $('hold').setAttribute('aria-pressed', holding);
+  $('hold').textContent = holding ? 'дальше' : 'пауза';
+  fetch('/control?hold=' + (holding ? 1 : 0));
+};
+document.querySelectorAll('[data-pace]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('[data-pace]').forEach(x => x.setAttribute('aria-pressed', x === b));
+    fetch('/control?pace=' + b.dataset.pace);
+  };
+});
+document.querySelectorAll('[data-zoom]').forEach(b => {
+  b.onclick = () => {
+    zoom = b.dataset.zoom;
+    document.querySelectorAll('[data-zoom]').forEach(x => x.setAttribute('aria-pressed', x === b));
+    applyZoom();
+  };
+});
+$('gridbtn').onclick = () => {
+  showGrid = !showGrid;
+  $('gridbtn').setAttribute('aria-pressed', showGrid);
+  applyZoom();
+};
+addEventListener('keydown', e => {
+  if(e.key === ' '){ e.preventDefault(); $('hold').click(); }
+  if(e.key === 'g') $('gridbtn').click();
+});
+
+renderRates();
+connect();
+</script>
+</body>
+</html>
