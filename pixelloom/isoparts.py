@@ -375,12 +375,20 @@ def render_parts(
     grain: float = 0.10,
     shadows: bool = True,
     seed: int = 1,
+    light: tuple[float, float, float] | None = None,
 ) -> Canvas:
     """Собрать спрайт из тел.
 
     Луч переводится в систему каждого тела, поэтому наклон, поворот и
     вытягивание работают для всех примитивов одинаково.
+
+    `light` задаёт свой источник вместо общего. Он нужен там, где предмет
+    обязан читаться сам по себе: у постройки свет сцены освещает верхние
+    грани и этого хватает, а у фигуры, стоящей лицом к зрителю, лицо при том
+    же свете уходит в ровную заливку рассеянным — объём пропадает целиком.
     """
+    light_v = LIGHT if light is None else np.array(light, dtype=float)
+    light_v = light_v / np.linalg.norm(light_v)
     canvas = Canvas(width, height, palette)
     canvas.data[:, :] = TRANSPARENT
 
@@ -434,12 +442,12 @@ def render_parts(
         n = np.einsum("ij,...j->...i", rot, nl / scale)
         n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-9)
 
-        lambert = np.clip((n * LIGHT).sum(axis=-1), 0, 1)
+        lambert = np.clip((n * light_v).sum(axis=-1), 0, 1)
         mat = part.material
         value = mat.ambient + (1.0 - mat.ambient) * lambert
 
         if mat.gloss > 0:
-            half = LIGHT + VIEW
+            half = light_v + VIEW
             half /= np.linalg.norm(half)
             spec = np.clip((n * half).sum(axis=-1), 0, 1) ** 24
             value = np.clip(value + spec * mat.gloss, 0, 1)
@@ -454,7 +462,7 @@ def render_parts(
                 if other is part:
                     continue
                 ol2 = np.einsum("ij,...j->...i", rot2.T, start - oc2) / sc2
-                dl2 = (rot2.T @ LIGHT) / sc2
+                dl2 = (rot2.T @ light_v) / sc2
                 ts = _hit_local(other, ol2, dl2)
                 lit = np.where(np.isfinite(ts), 0.58, lit)
             value = value * lit
