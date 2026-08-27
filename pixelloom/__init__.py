@@ -15,7 +15,7 @@
 
 from .canvas import TRANSPARENT, Canvas
 from .palette import Palette, hex_to_rgb, rgb_to_hex
-from . import critique, draw, gridfab, isoparts, noise, paint, palettes, passes, render, shading, volume
+from . import clean, critique, draw, gridfab, isoparts, noise, paint, palettes, passes, render, shading, volume
 from .render import (
     save_contact_sheet,
     save_gif,
