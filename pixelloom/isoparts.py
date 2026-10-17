@@ -1050,6 +1050,79 @@ def _screen_window(part: Part, px_per_m: float, origin, width: int, height: int,
     return slice(y0, y1), slice(x0, x1)
 
 
+def _rays(width: int, height: int, px_per_m: float, origin, cam: Camera):
+    """Начало луча под каждым пикселем кадра и общее направление взгляда."""
+    yy, xx = np.mgrid[0:height, 0:width]
+    sx = (xx - origin[0] * width).astype(float)
+    sy = (yy - origin[1] * height).astype(float)
+    return cam.to_world(sx / px_per_m, sy / px_per_m), cam.view
+
+
+def _nearest(parts, o, d, px_per_m, origin, width, height, cam):
+    """Ближайшее тело под каждым пикселем.
+
+    Возвращает глубину, номер тела и для каждого тела его подготовку: центр,
+    поворот, масштаб и окно кадра. У тела вне кадра вместо подготовки None.
+    """
+    best_t = np.full((height, width), np.inf)
+    best_idx = np.full((height, width), -1, dtype=int)
+    prepared = []
+    for i, part in enumerate(parts):
+        c = np.array(part.pos, dtype=float)
+        rot, scale = _prepare(part)
+        win = _screen_window(part, px_per_m, origin, width, height, cam)
+        if win is None:
+            prepared.append(None)
+            continue
+        ys, xs_ = win
+        o_w = o[ys, xs_]
+        ol = np.einsum("ij,...j->...i", rot.T, o_w - c) / scale
+        dl = (rot.T @ d) / scale
+        t = _hit_local(part, ol, dl)
+
+        if part.cut_below is not None:
+            p_world = o_w + np.where(np.isfinite(t), t, 0.0)[..., None] * d
+            t = np.where(p_world[..., 2] >= part.cut_below, t, np.inf)
+
+        prepared.append((part, c, rot, scale, win))
+        sub = best_t[ys, xs_]
+        closer = t < sub
+        best_t[ys, xs_] = np.where(closer, t, sub)
+        best_idx[ys, xs_] = np.where(closer, i, best_idx[ys, xs_])
+    return best_t, best_idx, prepared
+
+
+def _surface(entry, o, d, t_safe):
+    """Точка и нормаль тела в его окне кадра: локальные и мировые."""
+    part, c, rot, scale, (ys, xs_) = entry
+    o_w = o[ys, xs_]
+    t_w = t_safe[ys, xs_]
+    ol = np.einsum("ij,...j->...i", rot.T, o_w - c) / scale
+    dl = (rot.T @ d) / scale
+    pl = ol + t_w[..., None] * dl
+    nl = _normal_local(part, pl)
+    n = np.einsum("ij,...j->...i", rot, nl / scale)
+    n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-9)
+    return o_w, t_w, pl, nl, n
+
+
+def _cast_shadow(part, prepared, o_w, t_w, d, n, light_v):
+    """Доля света в точке: 1 на свету, 0,58 в тени другого тела."""
+    lit = np.ones(t_w.shape)
+    start = o_w + t_w[..., None] * d + n * 0.03
+    for other_entry in prepared:
+        if other_entry is None:
+            continue
+        other, oc2, rot2, sc2, _ = other_entry
+        if other is part or not other.casts_shadow:
+            continue
+        ol2 = np.einsum("ij,...j->...i", rot2.T, start - oc2) / sc2
+        dl2 = (rot2.T @ light_v) / sc2
+        ts = _hit_local(other, ol2, dl2)
+        lit = np.where(np.isfinite(ts), 0.58, lit)
+    return lit
+
+
 def render_parts(
     parts: list[Part],
     palette: Palette,
@@ -1080,47 +1153,15 @@ def render_parts(
     canvas = Canvas(width, height, palette)
     canvas.data[:, :] = TRANSPARENT
 
-    yy, xx = np.mgrid[0:height, 0:width]
-    sx = (xx - origin[0] * width).astype(float)
-    sy = (yy - origin[1] * height).astype(float)
-
-    k = px_per_m
-    o = cam.to_world(sx / k, sy / k)
-    d = cam.view
-
-    best_t = np.full((height, width), np.inf)
-    best_idx = np.full((height, width), -1, dtype=int)
-
-    prepared = []
-    for i, part in enumerate(parts):
-        c = np.array(part.pos, dtype=float)
-        rot, scale = _prepare(part)
-        win = _screen_window(part, px_per_m, origin, width, height, cam)
-        if win is None:
-            prepared.append(None)
-            continue
-        ys, xs_ = win
-        o_w = o[ys, xs_]
-        ol = np.einsum("ij,...j->...i", rot.T, o_w - c) / scale
-        dl = (rot.T @ d) / scale
-        t = _hit_local(part, ol, dl)
-
-        if part.cut_below is not None:
-            p_world = o_w + np.where(np.isfinite(t), t, 0.0)[..., None] * d
-            t = np.where(p_world[..., 2] >= part.cut_below, t, np.inf)
-
-        prepared.append((part, c, rot, scale, win))
-        sub = best_t[ys, xs_]
-        closer = t < sub
-        best_t[ys, xs_] = np.where(closer, t, sub)
-        best_idx[ys, xs_] = np.where(closer, i, best_idx[ys, xs_])
+    o, d = _rays(width, height, px_per_m, origin, cam)
+    best_t, best_idx, prepared = _nearest(parts, o, d, px_per_m, origin,
+                                          width, height, cam)
 
     solid = np.isfinite(best_t)
     if not solid.any():
         return canvas
 
     t_safe = np.where(solid, best_t, 0.0)
-    point = o + t_safe[..., None] * d
 
     for i, entry in enumerate(prepared):
         if entry is None:
@@ -1130,14 +1171,7 @@ def render_parts(
         if not mask_w.any():
             continue
 
-        o_w = o[ys, xs_]
-        t_w = t_safe[ys, xs_]
-        ol = np.einsum("ij,...j->...i", rot.T, o_w - c) / scale
-        dl = (rot.T @ d) / scale
-        pl = ol + t_w[..., None] * dl
-        nl = _normal_local(part, pl)
-        n = np.einsum("ij,...j->...i", rot, nl / scale)
-        n = n / np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-9)
+        o_w, t_w, pl, nl, n = _surface(entry, o, d, t_safe)
 
         lambert = np.clip((n * light_v).sum(axis=-1), 0, 1)
         mat = part.material
@@ -1154,19 +1188,7 @@ def render_parts(
             value = value + surface_detail(part, pl, nl, kind=kind)
 
         if shadows and not mat.emissive:
-            lit = np.ones_like(value)
-            start = o_w + t_w[..., None] * d + n * 0.03
-            for other_entry in prepared:
-                if other_entry is None:
-                    continue
-                other, oc2, rot2, sc2, _ = other_entry
-                if other is part or not other.casts_shadow:
-                    continue
-                ol2 = np.einsum("ij,...j->...i", rot2.T, start - oc2) / sc2
-                dl2 = (rot2.T @ light_v) / sc2
-                ts = _hit_local(other, ol2, dl2)
-                lit = np.where(np.isfinite(ts), 0.58, lit)
-            value = value * lit
+            value = value * _cast_shadow(part, prepared, o_w, t_w, d, n, light_v)
 
         if mat.emissive:
             lit_value = np.full_like(value, 0.92)
@@ -1183,6 +1205,67 @@ def render_parts(
         canvas.data[ys, xs_] = np.where(mask_w, tmp.data, sub)
 
     return canvas
+
+
+@dataclass
+class Trace:
+    """Что луч нашёл под каждым пикселем кадра.
+
+    `render_parts` сам решает, в какую ступень шкалы лёг пиксель. Тому, кто
+    красит по своим правилам — контур по силуэту, блик на кромке, отсвет на
+    стекле, — нужен не готовый цвет, а то, из чего цвет считается.
+    """
+
+    part: np.ndarray    # номер тела в списке; -1 там, где пусто
+    depth: np.ndarray   # путь луча до тела; inf там, где пусто
+    point: np.ndarray   # точка попадания в мире, метры
+    normal: np.ndarray  # нормаль в мире, единичная; нули там, где пусто
+    lit: np.ndarray     # 1 на свету, 0,58 в тени другого тела
+    detail: np.ndarray  # прибавка узора поверхности, как в render_parts
+
+
+def trace_parts(
+    parts: list[Part],
+    width: int,
+    height: int,
+    px_per_m: float = 8.0,
+    origin: tuple[float, float] = (0.5, 0.85),
+    shadows: bool = True,
+    light: tuple[float, float, float] | None = None,
+    camera: "str | Camera" = "iso",
+) -> Trace:
+    """Тот же проход лучей, что в `render_parts`, но без раскраски."""
+    cam = camera_of(camera)
+    light_v = LIGHT if light is None else np.array(light, dtype=float)
+    light_v = light_v / np.linalg.norm(light_v)
+
+    o, d = _rays(width, height, px_per_m, origin, cam)
+    best_t, best_idx, prepared = _nearest(parts, o, d, px_per_m, origin,
+                                          width, height, cam)
+    solid = np.isfinite(best_t)
+    t_safe = np.where(solid, best_t, 0.0)
+
+    point = np.where(solid[..., None], o + t_safe[..., None] * d, 0.0)
+    normal = np.zeros((height, width, 3))
+    lit = np.ones((height, width))
+    detail = np.zeros((height, width))
+    for i, entry in enumerate(prepared):
+        if entry is None:
+            continue
+        part, _, _, _, (ys, xs_) = entry
+        mask_w = solid[ys, xs_] & (best_idx[ys, xs_] == i)
+        if not mask_w.any():
+            continue
+        o_w, t_w, pl, nl, n = _surface(entry, o, d, t_safe)
+        normal[ys, xs_] = np.where(mask_w[..., None], n, normal[ys, xs_])
+        kind = part.detail or part.material.detail
+        if kind:
+            add = surface_detail(part, pl, nl, kind=kind)
+            detail[ys, xs_] = np.where(mask_w, add, detail[ys, xs_])
+        if shadows and not part.material.emissive:
+            share = _cast_shadow(part, prepared, o_w, t_w, d, n, light_v)
+            lit[ys, xs_] = np.where(mask_w, share, lit[ys, xs_])
+    return Trace(best_idx, best_t, point, normal, lit, detail)
 
 
 def ground_shadow(canvas: Canvas, parts: list[Part], px_per_m: float = 8.0,

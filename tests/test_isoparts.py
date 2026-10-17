@@ -81,3 +81,35 @@ def test_тень_ложится_и_не_трогает_прозрачность
     ground_shadow(canvas, [box()], px_per_m=12, origin=(0.5, 0.85),
                   index=palettes.BASE16.index_of("ink"))
     assert drawn(canvas) > before
+
+
+def test_трасса_совпадает_с_рисунком():
+    """Где рендер поставил пиксель, там трасса нашла тело, и наоборот."""
+    parts = [box(), Part("sphere", pos=(0.6, 0.6, 1.3), size=(0.4, 0, 0),
+                          material=GREY)]
+    canvas = render_parts(parts, palettes.BASE16, 64, 64, px_per_m=16)
+    trace = isoparts.trace_parts(parts, 64, 64, px_per_m=16)
+    assert np.array_equal(trace.part >= 0, canvas.data != TRANSPARENT)
+    assert set(np.unique(trace.part)) == {-1, 0, 1}
+
+
+def test_трасса_отдаёт_нормали_граней_коробки():
+    """У коробки видны три грани: верх, +x и +y. Нормали их и называют."""
+    trace = isoparts.trace_parts([box()], 64, 64, px_per_m=16)
+    n = trace.normal[trace.part == 0].round(3)
+    faces = {tuple(v) for v in np.unique(n, axis=0) if np.abs(v).max() == 1}
+    assert faces == {(0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)}
+    assert np.all(trace.depth[trace.part == -1] == np.inf)
+
+
+def test_трасса_видит_тень_соседа():
+    """Стенка в метр под светом в 45° кладёт тень на метр плиты, не дальше."""
+    wall = Part("box", pos=(0.0, 0.0, 0.5), size=(0.2, 3.0, 1.0), material=GREY)
+    floor = Part("box", pos=(1.3, 0.0, 0.05), size=(2.4, 2.0, 0.1), material=GREY)
+    trace = isoparts.trace_parts([wall, floor], 128, 128, px_per_m=16,
+                                 origin=(0.4, 0.6), light=(-1.0, 0.0, 1.0))
+    top = (trace.part == 1) & (trace.normal[..., 2] > 0.9)
+    x = trace.point[..., 0]
+    assert (trace.lit[top & (x < 0.9)] < 1).all()
+    assert (trace.lit[top & (x > 1.3)] == 1).all()
+    assert (top & (x < 0.9)).any() and (top & (x > 1.3)).any()
