@@ -109,10 +109,13 @@ def measure(rgb: np.ndarray, alpha: np.ndarray | None = None) -> Report:
         same += (np.roll(np.roll(key, dy, axis=0), dx, axis=1) == key).astype(np.int8)
     stray = float((solid & (same == 0)).sum() / max(1, solid.sum()))
 
-    # полосы: длина максимального одноцветного отрезка в строке
+    # полосы: длина максимального одноцветного отрезка в строке. Прозрачный фон
+    # полосой не считается: каждому пустому пикселю свой ключ, иначе мелкий
+    # предмет в широком кадре «полосит» одной пустотой вокруг себя
+    banded = np.where(solid, key, -1 - np.arange(h * w).reshape(h, w))
     runs = np.zeros(h, dtype=np.float32)
     for y in range(h):
-        row = key[y]
+        row = banded[y]
         edges = np.flatnonzero(np.diff(row)) + 1
         lengths = np.diff(np.concatenate(([0], edges, [w])))
         runs[y] = lengths.max() / w if len(lengths) else 1.0
